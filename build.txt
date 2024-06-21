@@ -1,0 +1,2 @@
+nvcc -o sha256d_main sha256d_main.cu sha256_kernel.cu -lcuda -lcudart -lssl -lcrypto
+./sha256d_main
