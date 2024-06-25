@@ -1,9 +1,16 @@
+#include <iostream>
+#include <vector>
+#include <chrono>
+#include <cstring>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <cstdio> 
+#include <openssl/sha.h>
 
 #define WARP_SIZE                    32
 #define NUM_WARPS_IN_BLOCK           4
+#ifndef MAX_GPU_THREADS
+#define MAX_GPU_THREADS 16
+#endif
 #define NUM_THREADS_IN_BLOCK         (NUM_WARPS_IN_BLOCK * WARP_SIZE)
 #define LAUNCH_BOUNDS                __launch_bounds__(NUM_THREADS_IN_BLOCK,1)
 #define DEVICE_FUNCTION_QUALIFIERS   __device__ __forceinline__
@@ -262,147 +269,112 @@ void sha256_chunk0(C16(COMMA,EMPTY),H8(COMMA,EMPTY))
   sha256_chunk(C16(COMMA,EMPTY),H8(COMMA,EMPTY));
 }
 
+struct vec8u {
+  uint32_t v[8];
+};
 
-extern "C" {
-   __global__ void sha256d_kernel(beu32* hash, const beu32 c0 , const beu32 c1 , const beu32 c2 , const beu32 c3 , const beu32 c4 , const beu32 c5 , const beu32 c6 , const beu32 c7 , const beu32 c8 , const beu32 c9 , const beu32 c10 , const beu32 c11 , const beu32 c12 , const beu32 c13 , const beu32 c14 , const beu32 c15)
-  {
-    #undef  H
-    #define H(i,alpha,magic)  beu32 hout##i;
+struct vec16u {
+  uint32_t v[16];
+};
 
-    H8(EMPTY,EMPTY);
+struct ThreadData {
+    vec8u state;
+    uint32_t rdata[9];
+};
 
-    #undef  C
-    #define C(i)              c##i
+struct MsgData {
+  uint32_t pseed[3];
+  ThreadData thrdata[MAX_GPU_THREADS];
+  vec8u target;
+};
 
-    beu32 temp[16];
-    #undef  H
-    #define H(i,alpha,magic)  &temp[i]
+struct DevHashResult {
+  uint64_t nonce;
+  uint32_t vcpu, found;
+};
 
-    // First hash computation
-    sha256_chunk0(c0 , c1 , c2 , c3 , c4 , c5 , c6 , c7 , c8 , c9 , c10 , c11 , c12 , c13 , c14 , c15 , &temp[0] , &temp[1] , &temp[2] , &temp[3] , &temp[4] , &temp[5] , &temp[6] , &temp[7]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 0, c0, 0, temp[0]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 1, c1, 1, temp[1]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 2, c2, 2, temp[2]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 3, c3, 3, temp[3]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 4, c4, 4, temp[4]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 5, c5, 5, temp[5]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 6, c6, 6, temp[6]);
-    // printf("sha256 1 values: c%d %u -> hout%d %u\n", 7, c7, 7, temp[7]);
-    // printf("sha256 1 values: c%d %u\n", 8, c8);
-    // printf("sha256 1 values: c%d %u\n", 9, c9);
-    // printf("sha256 1 values: c%d %u\n", 10, c10);
-    // printf("sha256 1 values: c%d %u\n", 11, c11);
-    // printf("sha256 1 values: c%d %u\n", 12, c12);
-    // printf("sha256 1 values: c%d %u\n", 13, c13);
-    // printf("sha256 1 values: c%d %u\n", 14, c14);
-    // printf("sha256 1 values: c%d %u\n", 15, c15);
+__constant__ MsgData c_msg;
 
-    temp[8] = 0x80000000;
-    temp[9] = 0x00000000;
-    temp[10] = 0x00000000;
-    temp[11] = 0x00000000;
-    temp[12] = 0x00000000;
-    temp[13] = 0x00000000;
-    temp[14] = 0x00000000;
-    temp[15] = 0x00000100; // Length of the hash in bits (256)
+extern "C" __global__ void sha256d_kernel(uint64_t start_nonce, DevHashResult *result) {
+    uint32_t vcpu = blockIdx.y;
+    ThreadData *thrdata = &c_msg.thrdata[vcpu];
 
-    // const bool use_second_hash = false;
-    const bool use_second_hash = true;
+    vec16u data;
 
-    if (use_second_hash) {
-      #undef  C
-      #define C(i)              temp[i]
+    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t nonce = start_nonce + idx;
 
-      sha256_chunk0(temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6], temp[7], temp[8], temp[9], temp[10], temp[11], temp[12], temp[13], temp[14], temp[15], &hout0 , &hout1 , &hout2 , &hout3 , &hout4 , &hout5 , &hout6 , &hout7 );
+    uint32_t rdata6 = thrdata->rdata[0], rdata7 = thrdata->rdata[1], rdata8 = thrdata->rdata[2];
+    uint64_t rdata = (((uint64_t)rdata6 << 56) | ((uint64_t)rdata7 << 24) | ((uint64_t)rdata8 >> 8)) + nonce;
 
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 0, temp[0], 0, hout0);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 1, temp[1], 1, hout1);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 2, temp[2], 2, hout2);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 3, temp[3], 3, hout3);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 4, temp[4], 4, hout4);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 5, temp[5], 5, hout5);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 6, temp[6], 6, hout6);
-      // printf("sha256 2 values: c%d %u -> hout%d %u\n", 7, temp[7], 7, hout7);
-      // printf("sha256 2 values: c%d %u\n", 8, temp[8]);
-      // printf("sha256 2 values: c%d %u\n", 9, temp[9]);
-      // printf("sha256 2 values: c%d %u\n", 10, temp[10]);
-      // printf("sha256 2 values: c%d %u\n", 11, temp[11]);
-      // printf("sha256 2 values: c%d %u\n", 12, temp[12]);
-      // printf("sha256 2 values: c%d %u\n", 13, temp[13]);
-      // printf("sha256 2 values: c%d %u\n", 14, temp[14]);
-      // printf("sha256 2 values: c%d %u\n", 15, temp[15]);
+    rdata6 = (uint32_t)(rdata >> 56) | (rdata6 & 0xFFFFFF00);
+    rdata7 = (uint32_t)(rdata >> 24);
 
-      #undef  H
-      #define H(i,alpha,magic)  hash[i] = hout##i;
-      H8(EMPTY,EMPTY);
+    uint32_t rdata10 = (uint32_t)(rdata << 8) | 0x80;
+    rdata8 = (uint32_t)(rdata << 8) | (rdata8 & 0xFF);
+
+    data.v[0x0] = rdata6;
+    data.v[0x1] = rdata7;
+    data.v[0x2] = rdata8;
+    data.v[0x3] = c_msg.pseed[0];
+    data.v[0x4] = c_msg.pseed[1];
+    data.v[0x5] = c_msg.pseed[2];
+    data.v[0x6] = thrdata->rdata[3];
+    data.v[0x7] = thrdata->rdata[4];
+    data.v[0x8] = thrdata->rdata[5];
+    data.v[0x9] = thrdata->rdata[6];
+    data.v[0xA] = thrdata->rdata[7];
+    data.v[0xB] = thrdata->rdata[8];
+    data.v[0xC] = rdata6;
+    data.v[0xD] = rdata7;
+    data.v[0xE] = rdata10;
+    data.v[0xF] = 0x00000000;
+
+    sha256_chunk0(data.v[0], data.v[1], data.v[2], data.v[3],
+                  data.v[4], data.v[5], data.v[6], data.v[7], 
+                  data.v[8], data.v[9], data.v[10], data.v[11],
+                  data.v[12], data.v[13], data.v[14], data.v[15], 
+                  &data.v[0], &data.v[1], &data.v[2], &data.v[3],
+                  &data.v[4], &data.v[5], &data.v[6], &data.v[7]);
+    
+    data.v[0x8] = 0x00000000;
+    data.v[0x9] = 0x00000000;
+    data.v[0xA] = 0x00000000;
+    data.v[0xB] = 0x00000000;
+    data.v[0xC] = 0x00000000;
+    data.v[0xD] = 0x00000000;
+    data.v[0xE] = 0x00000000;
+    data.v[0xF] = 0x000003d8;
+    
+    sha256_chunk0(data.v[0], data.v[1], data.v[2], data.v[3],
+              data.v[4], data.v[5], data.v[6], data.v[7], 
+              data.v[8], data.v[9], data.v[10], data.v[11],
+              data.v[12], data.v[13], data.v[14], data.v[15], 
+              &data.v[0], &data.v[1], &data.v[2], &data.v[3],
+              &data.v[4], &data.v[5], &data.v[6], &data.v[7]);
+
+    for (int i = 0; i < 8; i += 1) {
+      if (data.v[i] > c_msg.target.v[i])
+        return;
+
+      if (data.v[i] < c_msg.target.v[i]) {
+        if (atomicAdd(&result->found, 1) == 0) {
+          result->nonce = nonce, result->vcpu = vcpu;
+          printf("result: %p, result->vcpu: %d, result->nonce: %lu\n", result, result->vcpu, result->nonce);
+        }
+
+        return;
+      }
     }
-    else {
-      #undef  H
-      // #define H(i,alpha,magic)  hash[i] = hout##i;
-      #define H(i,alpha,magic)  hash[i] = temp[i];
-      H8(EMPTY,EMPTY);
-    }
-  }
+
+    // if ((idx + vcpu) % 10000000 == 0) {
+    //   uint32_t old_value = atomicAdd(&result->found, 1);
+    //   printf("old_value: %u, start_nonce: %lu, idx: %lu, vcpu: %lu\n", old_value, start_nonce, idx, vcpu);
+    //   if (old_value == 0) {
+    //       result->nonce = nonce;
+    //       result->vcpu = vcpu;
+    //       printf("result: %p, result->vcpu: %d, result->nonce: %lu, result->found: %u\n", result, result->vcpu, result->nonce, old_value);
+    //   }
+    // }
+    return;
 }
-
-// #include <stdio.h>
-
-// int main(int argc, char** argv)
-// {
-//   cudaError_t err;
-//   int         device = (argc == 1) ? 0 : atoi(argv[1]);
-
-//   cudaDeviceProp props;
-//   err = cudaGetDeviceProperties(&props,device);
-
-//   if (err)
-//     return -1;
-
-//   printf("%s (%2d)\n",props.name,props.multiProcessorCount);
-
-//   cudaSetDevice(device);
-
-//   beu32* d_hash;
-//   cudaMalloc(&d_hash,sizeof(beu32)*8);
-
-//   sha256d_kernel<<<1,1>>>(d_hash,
-//                             0x61626380,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000000,
-//                             0x00000018);
-
-//   err = cudaDeviceSynchronize();
-
-//   if (err) {
-//     printf("Err = %d\n",err);
-//     exit(err);
-//   }
-
-//   beu32 hash[8];
-
-//   cudaMemcpy(hash,d_hash,sizeof(beu32)*8,cudaMemcpyDeviceToHost);
-
-//   printf("gold: %08x %08x %08x %08x %08x %08x %08x %08x\n",
-//          0xba7816bf,0x8f01cfea,0x414140de,0x5dae2223,
-//          0xb00361a3,0x96177a9c,0xb410ff61,0xf20015ad);
-
-//   printf("cuda: %08x %08x %08x %08x %08x %08x %08x %08x\n",
-//          hash[0],hash[1],hash[2],hash[3],hash[4],hash[5],hash[6],hash[7]);
-
-//   cudaFree(d_hash);
-//   cudaDeviceReset();
-
-//   return 0;
-// }
